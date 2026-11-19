@@ -1,0 +1,44 @@
+name: Daily QT Auto-Sync (00:05 KST)
+
+on:
+  schedule:
+    # 매일 한국시간(KST) 오전 00:05 = UTC 15:05 자동 실행
+    - cron: '5 15 * * *'
+  workflow_dispatch:
+    inputs:
+      target_date:
+        description: '특정 날짜 수동 실행 (비워두면 오늘 KST, 형식: YYYY-MM-DD)'
+        required: false
+        default: ''
+
+permissions:
+  contents: write
+
+jobs:
+  update-daily-qt:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Fetch Duranno QT & Generate 10-step Commentary JSON
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          TARGET_DATE: ${{ github.event.inputs.target_date }}
+        run: python scripts/daily_sync.py
+
+      - name: Commit and push updated QT JSON
+        run: |
+          git config user.name "daily-qt-bot"
+          git config user.email "daily-qt-bot@users.noreply.github.com"
+          git add qt/
+          git diff --staged --quiet || git commit -m "chore(qt): update daily QT feed"
+          git push

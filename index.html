@@ -426,9 +426,20 @@
     <!-- 탭 4: 2026년 11월호 본문 캘린더 및 내 기록장 (Calendar View) -->
     <section id="view-calendar" class="hidden space-y-5 sm:space-y-6">
       <div class="bg-white rounded-2xl p-4 sm:p-6 border border-stone-200/90 shadow-sm space-y-4">
-        <div>
-          <h3 class="text-base sm:text-lg font-bold text-stone-900">📓 나의 QT 다이어리 보관함</h3>
-          <p class="text-xs text-stone-500">로드된 일자별 본문 및 내가 작성·저장한 QT 다이어리 기록입니다.</p>
+        <div class="flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <h3 class="text-base sm:text-lg font-bold text-stone-900">📓 나의 QT 다이어리 보관함</h3>
+            <p class="text-xs text-stone-500">작성한 모든 날짜의 다이어리·하이라이트 기록을 백업하거나 다른 기기에서 복원할 수 있습니다.</p>
+          </div>
+          <div class="flex flex-wrap items-center gap-2">
+            <button type="button" onclick="exportPersonalDiariesJson()" class="px-3 py-2 rounded-xl text-xs font-bold bg-amber-800 hover:bg-amber-700 text-white shadow-sm transition-all">
+              ⬇️ 다이어리 전체 백업 (.json)
+            </button>
+            <label class="px-3 py-2 rounded-xl text-xs font-semibold bg-stone-100 hover:bg-stone-200 text-stone-800 border border-stone-300 cursor-pointer transition-all">
+              📂 다른 기기 백업 복원
+              <input type="file" accept=".json,application/json" onchange="handleDiaryBackupRestore(event)" class="hidden" />
+            </label>
+          </div>
         </div>
         <div id="savedDiariesList" class="grid grid-cols-1 md:grid-cols-3 gap-3.5 sm:gap-4"></div>
       </div>
@@ -482,6 +493,28 @@
           </label>
           <div id="syncDiagnosticBox" class="text-xs text-stone-500">
             현재 상태: 내장 데이터(11/17~11/19) 활성 · 원격 피드 미지정
+          </div>
+        </div>
+
+        <!-- 선택한 날짜 즉시 생성 (GitHub Actions 온디맨드 트리거) -->
+        <div class="pt-4 border-t border-stone-200/80 space-y-3">
+          <div class="flex flex-wrap items-center justify-between gap-2">
+            <div>
+              <h4 class="text-xs sm:text-sm font-bold text-stone-900">⚡ 선택한 날짜 즉시 생성 연동 (GitHub Actions 온디맨드)</h4>
+              <p class="text-[11px] sm:text-xs text-stone-500 mt-0.5">미리 선택한 날짜의 JSON이 아직 없을 때 <strong>🔄 동기화</strong> 버튼을 누르면 GitHub Actions를 즉시 실행해 해당 날짜의 본문과 10단계 해설을 자동 생성하고 화면에 불러옵니다.</p>
+            </div>
+            <span id="onDemandStatusBadge" class="text-[11px] font-semibold px-2 py-0.5 rounded-full bg-stone-100 text-stone-600">미설정</span>
+          </div>
+          <div class="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
+            <input type="text" id="ghOwnerInput" placeholder="GitHub 아이디 (예: honggildong)" class="px-3 py-2 rounded-xl border border-stone-300 text-xs sm:text-sm focus:outline-none focus:ring-2 focus:ring-amber-600" />
+            <input type="text" id="ghRepoInput" placeholder="저장소 이름 (예: my-daily-qt)" class="px-3 py-2 rounded-xl border border-stone-300 text-xs sm:text-sm focus:outline-none focus:ring-2 focus:ring-amber-600" />
+            <input type="password" id="ghTokenInput" placeholder="GitHub Fine-grained Token (Actions 권한)" class="px-3 py-2 rounded-xl border border-stone-300 text-xs sm:text-sm focus:outline-none focus:ring-2 focus:ring-amber-600" />
+          </div>
+          <div class="flex flex-wrap items-center justify-between gap-2">
+            <p class="text-[11px] text-stone-400">※ 토큰은 내 기기 브라우저에만 저장되며 외부로 유출되지 않습니다.</p>
+            <button type="button" onclick="saveOnDemandConfig()" class="px-3.5 py-2 rounded-xl text-xs font-bold bg-stone-900 hover:bg-stone-800 text-white transition-all">
+              온디맨드 설정 저장
+            </button>
           </div>
         </div>
       </div>
@@ -1154,7 +1187,10 @@ if __name__ == "__main__":
         feedUrl: '',
         autoRollover: true,
         lastSyncAt: '',
-        lastSyncStatus: '내장 데이터 활성 · 원격 피드 미지정'
+        lastSyncStatus: '내장 데이터 활성 · 원격 피드 미지정',
+        ghOwner: '',
+        ghRepo: '',
+        ghToken: ''
       },
       highlightedVerses: {
         '2026-11-18': ['8:11', '9:6'],
@@ -1398,13 +1434,103 @@ if __name__ == "__main__":
       showToast('오늘(' + formatDateLabel(today) + ') 말씀으로 이동했습니다.');
     }
 
-    function triggerManualSync() {
-      if (state.syncConfig.feedUrl) {
-        syncFromFeed(state.currentDate, false);
-      } else {
+    let onDemandPollTimer = null;
+
+    async function triggerManualSync() {
+      const targetDate = state.currentDate;
+      if (!state.syncConfig.feedUrl && !state.syncConfig.ghToken) {
         switchTab('autosync');
-        showToast('원격 피드 URL을 등록하거나 새 날짜 JSON을 가져올 수 있습니다.');
+        showToast('원격 피드 URL 또는 GitHub 온디맨드 설정을 먼저 입력해 주세요.');
+        return;
       }
+
+      // 1단계: 이미 생성된 해당 날짜 JSON 피드가 있는지 즉시 확인
+      if (state.syncConfig.feedUrl) {
+        const found = await syncFromFeed(targetDate, true);
+        if (found) {
+          showToast(targetDate + ' 말씀과 10단계 해설을 동기화했습니다!');
+          return;
+        }
+      }
+
+      // 2단계: 아직 JSON이 없고 GitHub 온디맨드 설정이 되어 있으면 즉시 생성 워크플로 실행 + 자동 폴링
+      if (state.syncConfig.ghOwner && state.syncConfig.ghRepo && state.syncConfig.ghToken) {
+        await dispatchOnDemandWorkflow(targetDate);
+      } else {
+        showToast(targetDate + ' JSON이 아직 없습니다. ⚙️ 자동 업데이트 설정에서 온디맨드 연동을 켜거나 JSON을 등록해 주세요.');
+      }
+    }
+
+    async function dispatchOnDemandWorkflow(targetDate) {
+      const { ghOwner, ghRepo, ghToken } = state.syncConfig;
+      const pill = document.getElementById('syncStatusPill');
+      if (pill) pill.textContent = '⏳ ' + targetDate + ' 생성 요청 중...';
+      state.syncConfig.lastSyncStatus = targetDate + ' 본문 및 10단계 해설 생성을 요청했습니다...';
+      updateSyncUI();
+
+      try {
+        const dispatchUrl = 'https://api.github.com/repos/' + encodeURIComponent(ghOwner) + '/' + encodeURIComponent(ghRepo) + '/actions/workflows/daily-qt.yml/dispatches';
+        const resp = await fetch(dispatchUrl, {
+          method: 'POST',
+          headers: {
+            'Accept': 'application/vnd.github+json',
+            'Authorization': 'Bearer ' + ghToken,
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({
+            ref: 'main',
+            inputs: { target_date: targetDate }
+          })
+        });
+        if (!resp.ok) {
+          throw new Error('GitHub API HTTP ' + resp.status);
+        }
+        showToast(targetDate + ' QT 생성을 시작했습니다! 완료되면 자동으로 화면에 표시됩니다 (약 30~60초).');
+        startOnDemandPolling(targetDate);
+      } catch (err) {
+        state.syncConfig.lastSyncStatus = '온디맨드 요청 실패: ' + (err.message || '네트워크/권한 오류');
+        updateSyncUI();
+        showToast('온디맨드 실행 실패: 토큰 권한(Actions: Read & Write)과 저장소 이름을 확인해 주세요.');
+      }
+    }
+
+    function startOnDemandPolling(targetDate) {
+      if (onDemandPollTimer) clearInterval(onDemandPollTimer);
+      let attempts = 0;
+      const maxAttempts = 15; // 최대 약 2분 대기 (8초 간격)
+      const pill = document.getElementById('syncStatusPill');
+
+      onDemandPollTimer = setInterval(async () => {
+        attempts += 1;
+        if (pill) pill.textContent = '⏳ ' + targetDate + ' 생성 중 (' + (attempts * 8) + '초)...';
+        const ok = await syncFromFeed(targetDate, true);
+        if (ok) {
+          clearInterval(onDemandPollTimer);
+          onDemandPollTimer = null;
+          selectDate(targetDate);
+          showToast('🎉 ' + targetDate + ' 말씀과 10단계 해설이 자동으로 불러와졌습니다!');
+        } else if (attempts >= maxAttempts) {
+          clearInterval(onDemandPollTimer);
+          onDemandPollTimer = null;
+          state.syncConfig.lastSyncStatus = targetDate + ' 생성 대기 시간 초과 — 잠시 후 다시 동기화를 눌러 주세요.';
+          updateSyncUI();
+          showToast('생성이 다소 지연되고 있습니다. 잠시 후 🔄 동기화 버튼을 한 번 더 눌러 주세요.');
+        }
+      }, 8000);
+    }
+
+    function saveOnDemandConfig() {
+      state.syncConfig.ghOwner = (document.getElementById('ghOwnerInput').value || '').trim();
+      state.syncConfig.ghRepo = (document.getElementById('ghRepoInput').value || '').trim();
+      state.syncConfig.ghToken = (document.getElementById('ghTokenInput').value || '').trim();
+      if (!state.syncConfig.feedUrl && state.syncConfig.ghOwner && state.syncConfig.ghRepo) {
+        state.syncConfig.feedUrl = 'https://' + state.syncConfig.ghOwner + '.github.io/' + state.syncConfig.ghRepo + '/qt/{date}.json';
+        const feedInput = document.getElementById('feedUrlInput');
+        if (feedInput) feedInput.value = state.syncConfig.feedUrl;
+      }
+      persistState();
+      updateSyncUI();
+      showToast('선택한 날짜 즉시 생성(온디맨드) 설정이 저장되었습니다!');
     }
 
     function switchTab(tabName) {
@@ -1503,6 +1629,16 @@ if __name__ == "__main__":
       if (lastSyncEl) lastSyncEl.textContent = '마지막 동기화: ' + (state.syncConfig.lastSyncAt || '대기 중');
       const diagEl = document.getElementById('syncDiagnosticBox');
       if (diagEl) diagEl.textContent = '현재 상태: ' + state.syncConfig.lastSyncStatus;
+      const odBadge = document.getElementById('onDemandStatusBadge');
+      if (odBadge) {
+        if (state.syncConfig.ghOwner && state.syncConfig.ghRepo && state.syncConfig.ghToken) {
+          odBadge.textContent = '● 즉시 생성 활성';
+          odBadge.className = 'text-[11px] font-semibold px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-900 border border-emerald-200';
+        } else {
+          odBadge.textContent = '미설정';
+          odBadge.className = 'text-[11px] font-semibold px-2 py-0.5 rounded-full bg-stone-100 text-stone-600';
+        }
+      }
     }
 
     function renderBanner() {
@@ -1573,8 +1709,9 @@ if __name__ == "__main__":
               '<p class="text-xs sm:text-sm text-stone-600 max-w-xl mx-auto leading-relaxed">이 날짜의 상세 본문·해설 데이터는 아직 로컬에 동기화되지 않았습니다. 원격 JSON 피드를 연결하거나 새 날짜 JSON을 등록하면 자동으로 표시됩니다.</p>' +
             '</div>' +
             '<div class="flex flex-wrap items-center justify-center gap-2 pt-1">' +
-              '<a href="' + durannoUrl + '" target="_blank" rel="noopener noreferrer" class="px-4 py-2.5 rounded-xl text-xs sm:text-sm font-bold bg-amber-800 hover:bg-amber-700 text-white transition-all">두란노 ' + state.currentDate + ' 원문 보기 ↗</a>' +
-              '<button type="button" onclick="switchTab(\'autosync\')" class="px-4 py-2.5 rounded-xl text-xs sm:text-sm font-semibold bg-stone-100 hover:bg-stone-200 text-stone-800 border border-stone-300 transition-all">⚙️ 자동 피드 설정 / JSON 가져오기</button>' +
+              '<button type="button" onclick="triggerManualSync()" class="px-4 py-2.5 rounded-xl text-xs sm:text-sm font-bold bg-amber-800 hover:bg-amber-700 text-white shadow-sm transition-all">🔄 ' + state.currentDate + ' 지금 동기화하기</button>' +
+              '<a href="' + durannoUrl + '" target="_blank" rel="noopener noreferrer" class="px-4 py-2.5 rounded-xl text-xs sm:text-sm font-semibold bg-stone-100 hover:bg-stone-200 text-stone-800 border border-stone-300 transition-all">두란노 원문 보기 ↗</a>' +
+              '<button type="button" onclick="switchTab(\'autosync\')" class="px-4 py-2.5 rounded-xl text-xs sm:text-sm font-semibold bg-stone-100 hover:bg-stone-200 text-stone-800 border border-stone-300 transition-all">⚙️ 자동 설정</button>' +
             '</div>' +
           '</div>';
         document.getElementById('todayPrayerText').textContent = d.todayPrayer;
@@ -2130,6 +2267,12 @@ if __name__ == "__main__":
       if (feedInput) feedInput.value = state.syncConfig.feedUrl || '';
       const toggle = document.getElementById('autoRolloverToggle');
       if (toggle) toggle.checked = Boolean(state.syncConfig.autoRollover);
+      const ghOwner = document.getElementById('ghOwnerInput');
+      const ghRepo = document.getElementById('ghRepoInput');
+      const ghToken = document.getElementById('ghTokenInput');
+      if (ghOwner) ghOwner.value = state.syncConfig.ghOwner || '';
+      if (ghRepo) ghRepo.value = state.syncConfig.ghRepo || '';
+      if (ghToken) ghToken.value = state.syncConfig.ghToken || '';
       updateSyncUI();
       switchCodeTab(state.activeCodeTab);
     }
@@ -2251,6 +2394,74 @@ if __name__ == "__main__":
       } catch (err) {
         showToast('JSON 형식 오류: ' + err.message);
       }
+    }
+
+    function exportPersonalDiariesJson() {
+      const nonEmptyDiaries = {};
+      Object.keys(state.diaries).forEach(k => {
+        const e = state.diaries[k];
+        if (e && (e.completed || e.highlightVerse || e.q1 || e.q2 || e.q3 || e.myPrayer)) {
+          nonEmptyDiaries[k] = e;
+        }
+      });
+      const count = Object.keys(nonEmptyDiaries).length;
+      const payload = {
+        type: 'daily_qt_diary_backup',
+        version: 1,
+        exportedAt: new Date().toISOString(),
+        diaryCount: count,
+        diaries: nonEmptyDiaries,
+        highlightedVerses: state.highlightedVerses,
+        amenState: state.amenState
+      };
+      const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json;charset=utf-8' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = '내_QT다이어리_백업_' + getKSTTodayKey() + '.json';
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+      showToast('작성한 QT 다이어리 ' + count + '일치 기록을 JSON 파일로 백업했습니다!');
+    }
+
+    function handleDiaryBackupRestore(event) {
+      const file = event.target.files && event.target.files[0];
+      if (!file) return;
+      const reader = new FileReader();
+      reader.onload = function(e) {
+        try {
+          const parsed = JSON.parse(e.target.result);
+          if (!parsed || typeof parsed.diaries !== 'object') {
+            throw new Error('올바른 QT 다이어리 백업 파일이 아닙니다.');
+          }
+          let restoredCount = 0;
+          Object.keys(parsed.diaries).forEach(k => {
+            if (/^\d{4}-\d{2}-\d{2}$/.test(k) && parsed.diaries[k]) {
+              state.diaries[k] = Object.assign(
+                { highlightVerse: '', q1: '', q2: '', q3: '', myPrayer: '', completed: false, updatedAt: '' },
+                parsed.diaries[k]
+              );
+              restoredCount += 1;
+            }
+          });
+          if (parsed.highlightedVerses && typeof parsed.highlightedVerses === 'object') {
+            state.highlightedVerses = Object.assign({}, state.highlightedVerses, parsed.highlightedVerses);
+          }
+          if (parsed.amenState && typeof parsed.amenState === 'object') {
+            state.amenState = Object.assign({}, state.amenState, parsed.amenState);
+          }
+          persistState();
+          renderAll();
+          showToast('🎉 ' + restoredCount + '일치 QT 다이어리와 하이라이트 기록을 성공적으로 복원했습니다!');
+        } catch (err) {
+          showToast('복원 실패: ' + (err.message || 'JSON 형식을 확인해 주세요.'));
+        } finally {
+          event.target.value = '';
+        }
+      };
+      reader.readAsText(file, 'utf-8');
     }
 
     function exportAllQtDataJson() {
